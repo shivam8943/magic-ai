@@ -1,89 +1,60 @@
+import os
 import logging
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-import os
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import requests
-import time
 
-# ENV Variables
-TOKEN = os.getenv("TOKEN")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
+# Logging setup
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-logging.basicConfig(level=logging.INFO)
+# Get bot token and API key from Railway environment
+TOKEN = os.environ.get("TOKEN")
+DEEPAI_API_KEY = os.environ.get("DEEPAI_API_KEY")
 
-# Start
+# Free users limit
+FREE_EDIT_LIMIT = 1
+
+# Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome to Photo Magic AI! Send a photo and then use /enhance")
+    user_id = update.effective_user.id
+    context.user_data["used"] = 0
+    await update.message.reply_text("Welcome to Photo Magic AI!\nSend me a photo and I'll enhance it for you!")
 
-# Handle Photo
+# Handle photo
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-    photo_path = f"{update.message.from_user.id}_photo.jpg"
-    await file.download_to_drive(photo_path)
-    context.user_data["photo_path"] = photo_path
-    await update.message.reply_text("Photo received! Now send /enhance")
+    user_id = update.effective_user.id
+    used = context.user_data.get("used", 0)
 
-# Upload to file.io
-def upload_image_to_fileio(path):
-    with open(path, 'rb') as f:
-        response = requests.post("https://file.io", files={"file": f})
-        if response.status_code == 200:
-            return response.json()["link"]
-        return None
-
-# Enhance
-async def enhance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "photo_path" not in context.user_data:
-        await update.message.reply_text("Please send a photo first.")
+    if used >= FREE_EDIT_LIMIT:
+        await update.message.reply_text("Free limit reached. To use unlimited photo enhancement, upgrade to Premium (₹249/month).\nPay via UPI: 8264327023@ybl and send screenshot on support.")
         return
 
-    path = context.user_data["photo_path"]
-    await update.message.reply_text("Uploading your photo...")
+    file = await update.message.photo[-1].get_file()
+    file_path = f"{user_id}_photo.jpg"
+    await file.download_to_drive(file_path)
 
-    image_url = upload_image_to_fileio(path)
-    if not image_url:
-        await update.message.reply_text("Failed to upload image.")
-        return
+    # Upload to DeepAI
+    with open(file_path, 'rb') as image_file:
+        response = requests.post(
+            "https://api.deepai.org/api/torch-srgan",
+            files={'image': image_file},
+            headers={'api-key': DEEPAI_API_KEY}
+        )
 
-    await update.message.reply_text("Enhancing your photo...")
-
-    headers = {
-        "Authorization": f"Token {REPLICATE_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    data = {
-        "version": "92858f8f27054f8c845d4e49b1c7795d4c7e5d370beff8fdfacbff576f1af0ee",
-        "input": {
-            "image": image_url
-        }
-    }
-
-    response = requests.post("https://api.replicate.com/v1/predictions", headers=headers, json=data)
-    if response.status_code != 201:
-        await update.message.reply_text("AI model error. Please try again later.")
-        return
-
-    prediction = response.json()
-    get_url = prediction["urls"]["get"]
-
-    # Poll for result
-    for _ in range(20):
-        time.sleep(2)
-        result = requests.get(get_url, headers=headers).json()
-        if result["status"] == "succeeded":
-            await update.message.reply_photo(result["output"])
-            os.remove(path)
-            return
-
-    await update.message.reply_text("Timed out. Try again later.")
+    data = response.json()
+    if "output_url" in data:
+        await update.message.reply_photo(photo=data["output_url"], caption="Here’s your enhanced photo!")
+        context.user_data["used"] = used + 1
+    else:
+        await update.message.reply_text("Failed to enhance image. Please try again later.")
 
 # Main
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("enhance", enhance))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.run_polling()
 
