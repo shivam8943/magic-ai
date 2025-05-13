@@ -1,60 +1,93 @@
 import logging
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
 import os
+import time
 
-# ======= Tere Token & API Key =======
-BOT_TOKEN = "8131148603:AAFzVpTJrQeOkYU8qd74lh-ToPKLDUYYsgk"
-DEEPAI_API_KEY = "quickstart-QUdJIGlzIGNvbWluZy4uLi4K"
-# ====================================
+TOKEN = "8131148603:AAFzVpTJrQeOkYU8qd74lh-ToPKLDUYYsgk"
+REPLICATE_API_TOKEN = "r8_PikmNXylQqvGVcLKh1dcIYbnzCEH1KMGykeD"
 
-# Setup logging
+# Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome to Photo Magic AI!\nSend a photo and use /enhance to improve it.")
+    await update.message.reply_text("Welcome to Photo Magic AI! Send a photo and use /enhance, /ghibli or /bgremove.")
 
-# Handle received photo
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = await update.message.photo[-1].get_file()
+    photo_file = await update.message.photo[-1].get_file()
     file_path = f"{update.message.from_user.id}_photo.jpg"
-    await photo.download_to_drive(file_path)
+    await photo_file.download_to_drive(file_path)
     context.user_data["photo"] = file_path
-    await update.message.reply_text("Photo received! Now send /enhance to improve it.")
+    await update.message.reply_text("Photo received! Now send /enhance or /ghibli or /bgremove")
 
-# Enhance photo using DeepAI
 async def enhance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "photo" not in context.user_data:
         await update.message.reply_text("Please send a photo first.")
         return
 
     photo_path = context.user_data["photo"]
-    await update.message.reply_text("Enhancing your photo...")
+    await update.message.reply_text("Enhancing your photo... Please wait 15-30 seconds.")
 
-    response = requests.post(
-        "https://api.deepai.org/api/torch-srgan",
-        files={"image": open(photo_path, "rb")},
-        headers={"api-key": DEEPAI_API_KEY}
-    )
+    with open(photo_path, "rb") as file:
+        image_data = file.read()
 
-    if response.status_code == 200:
-        output_url = response.json().get("output_url")
-        await update.message.reply_photo(photo=output_url, caption="Here is your enhanced photo!")
-    else:
-        await update.message.reply_text("Something went wrong while enhancing the photo.")
+    # Upload image to imgur or temp hosting (Replicate needs a public URL)
+    img_url = upload_image(image_data)
+    if not img_url:
+        await update.message.reply_text("Failed to upload image.")
+        return
 
-# Placeholder commands
+    # Call Replicate API
+    url = "https://api.replicate.com/v1/predictions"
+    headers = {
+        "Authorization": f"Token {REPLICATE_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "version": "92858f8f27054f8c845d4e49b1c7795d4c7e5d370beff8fdfacbff576f1af0ee",
+        "input": {
+            "image": img_url
+        }
+    }
+
+    response = requests.post(url, headers=headers, json=data).json()
+    prediction_url = response.get("urls", {}).get("get")
+    
+    # Wait for processing
+    for _ in range(20):
+        result = requests.get(prediction_url, headers=headers).json()
+        status = result.get("status")
+        if status == "succeeded":
+            output_url = result.get("output")[0]
+            await update.message.reply_photo(photo=output_url)
+            return
+        elif status == "failed":
+            await update.message.reply_text("Enhancement failed.")
+            return
+        time.sleep(2)
+
+    await update.message.reply_text("Enhancement timed out. Try again.")
+
+def upload_image(image_data):
+    try:
+        response = requests.post(
+            "https://freeimage.host/api/1/upload",
+            files={"source": image_data},
+            data={"action": "upload", "type": "file"},
+        )
+        return response.json()["image"]["url"]
+    except:
+        return None
+
 async def ghibli(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ghibli Art feature is coming soon.")
+    await update.message.reply_text("Ghibli Art generation is under development.")
 
 async def bgremove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Background remover feature is under development.")
+    await update.message.reply_text("Background remover feature coming soon.")
 
-# Main function
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("enhance", enhance))
     app.add_handler(CommandHandler("ghibli", ghibli))
